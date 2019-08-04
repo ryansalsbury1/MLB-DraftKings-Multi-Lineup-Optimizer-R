@@ -1,0 +1,270 @@
+---
+title: "MLB DK Optimizer"
+author: "Ryan Salsbury"
+date: "4/2/2019"
+output: html_document
+---
+
+MLB multi-lineup optimizer for DraftKings using the lpSolveAPI package. 
+Input file should contain the following column headers:
+Position, NameID, Name,	ID,	pos, Salary, Game Info, Team, AvgPointsPerGame, Yahoo, Fanduel, Points
+
+Load Packages and upload input file
+```{r}
+
+library(lpSolveAPI)
+library(lpSolve)
+library(rvest)
+library(magrittr)
+library(dplyr)
+library(stringr)
+library(sqldf)
+
+#Get Salaries/PlayerID's from DK - https://www.draftkings.com/lineup/upload - download linked file as - save as mlbdkID
+
+mlbdk <- read.csv("mlbdk.csv")
+
+#Only want players who are projected to have points
+mlbdk <- sqldf("select * from mlbdk where Points > 0")
+
+#Remove / from position column for the players who are eligible for multiple positions
+mlbdk$pos <- gsub('/', '', mlbdk$pos)
+
+mlbdk$pos <- as.factor(mlbdk$pos)
+
+```
+
+Specify the number of lineups to create and optionally choose players to include/exclude from the lineups
+```{r}
+
+NumOfLineups = 10
+
+#Leave the below variables alone if there should be no restrictions; otherwise separate multiple players between the quotes with commas. ex: sqldf("select * from mlbdk where Name IN ('Bryce Harper', 'Mookie Betts')")
+
+#Players that should be in every lineup
+IncludePlayers <- sqldf("select * from mlbdk where Name IN ('')")
+
+#Players that should not be in any lineup
+ExcludePlayers <- sqldf("select * from mlbdk where Name IN ('')")
+
+```
+
+Run the below code to get the lineups stored in the dkLineup variable.
+```{r}
+#Create variables with binary variables based on the position of each player 
+P <- ifelse(mlbdk$pos == "P", 1, 0)
+FB <- ifelse(mlbdk$pos == "1B" | mlbdk$pos == "1B3B" | mlbdk$pos == "1B2B" | mlbdk$pos == "1BOF" | mlbdk$pos == "C1B", 1, 0)
+SB <- ifelse(mlbdk$pos == "2B" | mlbdk$pos == "1B2B" | mlbdk$pos == "2BSS" | mlbdk$pos == "2B3B" | mlbdk$pos == "2BOF", 1, 0)
+TB <- ifelse(mlbdk$pos == "3B" | mlbdk$pos == "1B3B" | mlbdk$pos == "3BOF" | mlbdk$pos == "2B3B" | mlbdk$pos == "3BSS", 1, 0)
+SS <- ifelse(mlbdk$pos == "SS" | mlbdk$pos == "3BSS" | mlbdk$pos == "2BSS" | mlbdk$pos == "SSOF", 1, 0)
+C <- ifelse(mlbdk$pos == "C" | mlbdk$pos == "C1B", 1, 0)
+OF <- ifelse(mlbdk$pos == "OF" | mlbdk$pos == "3BOF"| mlbdk$pos == "2BOF" | mlbdk$pos == "1BOF" | mlbdk$pos == "SSOF", 1, 0)
+
+
+#Add binary values for positions  'Constraint Vectors'
+data <- cbind(mlbdk, X=1)
+data <- cbind(data, C=ifelse(data$pos=="C",1,0))
+data <- cbind(data, CFB=ifelse(data$pos=="C1B",1,0))
+data <- cbind(data, FB=ifelse(data$pos=="1B", 1,0))
+data <- cbind(data, FBTB=ifelse(data$pos=="1B3B", 1,0))
+data <- cbind(data, FBSB=ifelse(data$pos=="1B2B", 1,0))
+data <- cbind(data, FBOF=ifelse(data$pos=="1BOF", 1,0))
+data <- cbind(data, SB=ifelse(data$pos=="2B", 1,0))
+data <- cbind(data, SBSS=ifelse(data$pos=="2BSS", 1,0))
+data <- cbind(data, SBTB=ifelse(data$pos=="2B3B", 1,0))
+data <- cbind(data, SBOF=ifelse(data$pos=="2BOF", 1,0))
+data <- cbind(data, TB=ifelse(data$pos=="3B", 1,0))
+data <- cbind(data, TBOF=ifelse(data$pos=="3BOF", 1,0))
+data <- cbind(data, TBSS=ifelse(data$pos=="3BSS", 1,0))
+data <- cbind(data, SS=ifelse(data$pos=="SS", 1,0))
+data <- cbind(data, SSOF=ifelse(data$pos=="SSOF", 1,0))
+data <- cbind(data, P=ifelse(data$pos=="P", 1,0))
+data <- cbind(data, OF=ifelse(data$pos=="OF", 1,0))
+
+
+#Constraints
+num_X <- 10
+num_P <- 2
+num_C <- 1
+num_1B <- 1
+num_2B <- 1
+num_3B <- 1
+num_SS <- 1
+num_OF <- 3
+max_C1B <- 2
+max_1B2B <- 2
+max_1B3B <- 2
+max_1BOF <- 4
+max_2BSS <-2
+max_2B3B <- 2
+max_2BOF <- 4
+max_3BOF <- 4
+max_3BSS <- 2
+max_SSOF <- 4
+
+Lineup <- vector("list", length(1:NumOfLineups))
+#Initiate Score
+Score <- 500
+#Initiate r
+r = 1
+  
+while(r < length(Lineup) + 1){
+    
+      
+  #Number of decision variables is equal to the number of fantasy players/teams
+  lpfantasy <- make.lp(0, nrow(data))
+  
+  #Set objective function with the expected number of Points
+  set.objfn(lpfantasy, data$Points)
+  
+  #Make sure the decision variables are binary
+  set.type(lpfantasy, seq(1, nrow(data), by=1), type = c("binary"))
+  
+  #Decrease Score by 0.1 for each iteration so each optimal lineup is different
+  Score <- Score - 0.01
+  
+  #Add constraints
+    add.constraint(lpfantasy, data$X, "=", num_X)
+    add.constraint(lpfantasy, data$P , "=", num_P)
+    add.constraint(lpfantasy, data$FB + data$FBTB + data$FBSB + data$FBOF + data$CFB, ">=", num_1B)
+    add.constraint(lpfantasy, data$SB + data$SBSS + data$SBTB + data$SBOF + data$FBSB, ">=", num_2B)
+    add.constraint(lpfantasy, data$TB + data$TBOF +  data$FBTB + data$TBSS + data$SBTB, ">=", num_3B)
+    add.constraint(lpfantasy, data$SS + data$SSOF + data$SBSS + data$TBSS, ">=", num_SS)
+    add.constraint(lpfantasy, data$C + data$CFB, ">=", num_C)
+    add.constraint(lpfantasy, data$OF + data$FBOF + data$SBOF + data$TBOF + data$SSOF, ">=", num_OF)
+    
+    add.constraint(lpfantasy, data$C + data$FB + data$CFB, "<=", max_C1B)
+    add.constraint(lpfantasy, data$FB + data$SB + data$FBSB , "<=", max_1B2B)
+    add.constraint(lpfantasy, data$FB + data$TB + data$FBTB , "<=", max_1B3B)
+    add.constraint(lpfantasy, data$FB + data$OF + data$FBOF, "<=", max_1BOF)
+    add.constraint(lpfantasy, data$SB + data$SS + data$SBSS, "<=", max_2BSS )
+    add.constraint(lpfantasy, data$SB + data$TB + data$SBTB, "<=", max_2B3B)
+    add.constraint(lpfantasy, data$SB + data$OF + data$SBOF, "<=", max_2BOF)
+    add.constraint(lpfantasy, data$TB + data$OF + data$TBOF, "<=", max_3BOF)
+    add.constraint(lpfantasy, data$TB + data$SS + data$TBOF, "<=", max_3BSS)
+    add.constraint(lpfantasy, data$SS + data$OF + data$SSOF, "<=", max_SSOF)
+    
+    
+    add.constraint(lpfantasy, data$Points, "<=", Score)
+    
+    #No more than five players from each team
+        team_names <- levels(factor(mlbdk$Team))  
+    for(i in 1:length(team_names)) {
+      
+      no_five <- ifelse(mlbdk$Team == team_names[i] & mlbdk$pos != 'P', 1, 0)
+      add.constraint(lpfantasy, no_five, "<=", 5)
+    }
+  
+  
+  #Add monetary constraint, max salary for the lineup
+  cap <- 50000
+  add.constraint(lpfantasy, data$Salary, "<=", cap)
+  
+  #Include Players Constraint
+  if(nrow(IncludePlayers) > 0) { for(k in 1:nrow(IncludePlayers)) {
+   add.constraint(lpfantasy, ifelse(IncludePlayers$Name[k] == data$Name ,1, 0), "=", 1)}}
+  
+  #Exclude Players Constraint
+  if(nrow(ExcludePlayers) > 0) { for(k in 1:nrow(ExcludePlayers)) {
+   add.constraint(lpfantasy, ifelse(ExcludePlayers$Name[k] == data$Name ,1, 0), "=", 0)}}
+  
+  
+  ## Set objective direction
+  lp.control(lpfantasy, sense='max')
+  
+  
+  
+#Find all solutions if there are multiple optimal lineups that meet the constraints.
+#ex: If there are 5 different lineups that all project to score 120 points, all of them should be returned in the ouput.  
+rc<-solve(lpfantasy)
+multisols<-list()
+obj0<-get.objective(lpfantasy)
+while(TRUE) {
+   sol <- round(get.variables(lpfantasy))
+   multisols <- c(multisols,list(sol))
+   add.constraint(lpfantasy,2*sol-1,"<=", sum(sol)-1)
+   rc<-solve(lpfantasy)
+   if (rc!=0) break;
+   if (get.objective(lpfantasy)<obj0-1e-6) break;
+}
+ 
+
+P1 <- as.data.frame(P)
+P2 <- as.data.frame(P)
+C1 <- as.data.frame(C)
+FB1 <- as.data.frame(FB)
+SB1 <- as.data.frame(SB)
+TB1 <- as.data.frame(TB)
+SS1 <- as.data.frame(SS)
+OF1 <- as.data.frame(OF)
+OF2 <- as.data.frame(OF)
+OF3 <- as.data.frame(OF)
+
+
+data2 <- sqldf("select data.*, P1.P, P2.P, C1.C, FB1.FB, SB1.SB, TB1.TB, SS1.SS, OF1.OF, OF2.OF, OF3.OF from data join P1 ON data.rowid = P1.rowid join P2 ON data.rowid = P2.rowid  join C1 ON data.rowid = C1.rowid join FB1 ON data.rowid = FB1.rowid join SB1 ON data.rowid = SB1.rowid join TB1 ON data.rowid = TB1.rowid join SS1 ON data.rowid = SS1.rowid join OF1 ON data.rowid = OF1.rowid join OF2 ON data.rowid = OF2.rowid join OF3 ON data.rowid = OF3.rowid")
+ 
+Lineups <- vector("list", length(multisols))
+m = 1 
+
+while((r < length(Lineup) + 1) & m <= length(Lineups) ){
+  
+
+  
+#Get the players on the team
+Lineups[[m]] <-  subset(data.frame(data2, multisols[[m]]), multisols[[m]] == 1)
+#Get the total points of the lineup  
+Score<-sum(Lineups[[m]]$Points)
+  
+  
+DF <- Lineups[[m]]
+  
+#Put each player in the correct roster position since players are eligible for multiple positions  
+res <- lp.transport(as.matrix(DF[,31:40]), "max", rep("=", 10), rep(1, 10), rep("=", 10), rep(1, 10), integers = 0:1)
+soln <- array(res$solution, dim(DF[,31:40]))
+# verify that it is done correctly
+all(colSums(soln)==1) && all(rowSums(soln)==1) && all(dim(DF[,10:17]>=soln) && all(soln %in% 0:1))
+## [1] TRUE
+
+DF <- as.data.frame(DF)
+soln <- as.data.frame(soln)
+
+Lineups[[m]] <- sqldf("select NameID, soln.* from DF join soln on DF.rowid = soln.rowid")
+
+#create new name as lists can't be selected in sqldf
+lu <- Lineups[[m]]
+
+ P2 <- sqldf("select l.NameID AS P1 from lu l WHERE V1 >0", method = data.frame)
+ P3 <- sqldf("select l.NameID AS P2 from lu l WHERE V2 >0", method = data.frame)
+ C2 <- sqldf("select l.NameID AS C from lu l WHERE V3 >0", method = data.frame)
+ FB2 <- sqldf("select l.NameID AS FB from lu l WHERE V4 >0", method = data.frame)
+ SB2 <- sqldf("select l.NameID AS SB from lu l WHERE V5 >0", method = data.frame)
+ TB2 <- sqldf("select l.NameID AS TB from lu l WHERE V6 >0", method = data.frame)
+ SS2 <- sqldf("select l.NameID AS SS from lu l WHERE V7 >0", method = data.frame)
+ OF2  <- sqldf("select l.NameID AS OF1 from lu l WHERE V8 >0", method = data.frame)
+ OF3  <- sqldf("select l.NameID AS OF2 from lu l WHERE V9 >0", method = data.frame)
+ OF4  <- sqldf("select l.NameID AS OF3 from lu l WHERE V10 >0", method = data.frame)
+ 
+Lineups[[m]] <- sqldf("select P2.P1, P3.P2, C2.C, FB2.FB, SB2.SB, TB2.TB, SS2.SS, OF2.OF1, OF3.OF2, OF4.OF3 FROM P2 JOIN P3 On P2.rowid = P3.rowid JOIN C2 On P2.rowid = C2.rowid JOIN FB2 On P2.rowid = FB2.rowid JOIN SB2 On P2.rowid = SB2.rowid JOIN TB2 On P2.rowid = TB2.rowid JOIN SS2 On P2.rowid = SS2.rowid JOIN OF2 On P2.rowid = OF2.rowid JOIN OF3 On P2.rowid = OF3.rowid JOIN OF4 On P2.rowid = OF4.rowid")
+   
+   Lineups[[m]]$Score <- Score
+   
+ Lineup[[r]] <- Lineups[[m]]
+     
+     
+        m = m + 1
+        r = r + 1
+   
+     
+    }
+    }
+
+#Combine all lineups into one data frame - This output can be copied directly to DraftKings Lineup Import
+dkLineup <- data.frame(matrix(unlist(Lineup), nrow=length(Lineup), byrow=T),stringsAsFactors=FALSE)
+
+#Write output lineups to csv file
+#write.csv(dkLineup, "dkLineups.csv", row.names=FALSE)
+
+```
+
+
+
